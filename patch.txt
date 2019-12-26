@@ -1,0 +1,1363 @@
+diff -ruN src.org/MyProjectionClient/D2DRenderWindow.cpp src/MyProjectionClient/D2DRenderWindow.cpp
+--- src.org/MyProjectionClient/D2DRenderWindow.cpp	2018-10-31 11:49:12.178122400 +0900
++++ src/MyProjectionClient/D2DRenderWindow.cpp	2018-11-06 16:33:53.950013600 +0900
+@@ -12,24 +12,25 @@
+ CD2DRenderWindow::~CD2DRenderWindow()
+ {
+ 	DeleteCriticalSection(&cs);
++	ResetWinPhoneProjectionClient(hProjectionClient);
+ 	if (hThreadReader)
+ 	{
+-		TerminateThread(hThreadReader,-1);
+-		WaitForSingleObject(hThreadReader,INFINITE);
++		//TerminateThread(hThreadReader,-1);
++		WaitForSingleObject(hThreadReader, INFINITE);
+ 		CloseHandle(hThreadReader);
++		hThreadReader = NULL;
+ 	}
++	if (hSyncEvent)
++		CloseHandle(hSyncEvent);
+ 	if (hThreadRender)
+ 	{
+-		TerminateThread(hThreadRender,-1);
+-		WaitForSingleObject(hThreadRender,INFINITE);
++		//TerminateThread(hThreadRender,-1);
++		WaitForSingleObject(hThreadRender, INFINITE);
+ 		CloseHandle(hThreadRender);
++		hThreadRender = NULL;
+ 	}
+-	if (hSyncEvent)
+-		CloseHandle(hSyncEvent);
+ 	if (hProjectionClient)
+ 		FreeWinPhoneProjectionClient(hProjectionClient);
+-	if (pBufOfRaw)
+-		free(pBufOfRaw);
+ 	if (pBufOfConverted)
+ 		free(pBufOfConverted);
+ 	SAFE_RELEASE(pRawBitmap);
+@@ -58,37 +59,53 @@
+ 		lastHR = E_POINTER;
+ 		return FALSE;
+ 	}
+-	if (FAILED(CoCreateInstance(CLSID_WICImagingFactory1,NULL,CLSCTX_ALL,IID_PPV_ARGS(&pWICFactory))))
++	if (pWICFactory == NULL)
+ 	{
+-		lastHR = E_FAIL;
+-		return FALSE;
+-	}
+-	if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED,&pD2DFactory)))
+-	{
+-		lastHR = E_ABORT;
+-		return FALSE;
++		if (FAILED(CoCreateInstance(CLSID_WICImagingFactory1, NULL, CLSCTX_ALL, IID_PPV_ARGS(&pWICFactory))))
++		{
++			lastHR = E_FAIL;
++			return FALSE;
++		}
+ 	}
+-	pD2DFactory->CreateHwndRenderTarget(&D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,D2D1_ALPHA_MODE_IGNORE)),
+-		   &D2D1::HwndRenderTargetProperties(hRender,D2D1::SizeU()),
+-		   &pRender);
+-	if (hRender == NULL)
++	if (pD2DFactory == NULL)
+ 	{
+-		lastHR = E_DRAW;
+-		return FALSE;
++		if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, &pD2DFactory)))
++		{
++			lastHR = E_ABORT;
++			return FALSE;
++		}
++		pD2DFactory->CreateHwndRenderTarget(&D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE)),
++			&D2D1::HwndRenderTargetProperties(hRender, D2D1::SizeU()),
++			&pRender);
++		if (hRender == NULL)
++		{
++			lastHR = E_DRAW;
++			return FALSE;
++		}
++		pRender->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+ 	}
++	if (hProjectionClient)
++		FreeWinPhoneProjectionClient(hProjectionClient);
+ 	hProjectionClient = InitWinPhoneProjectionClient(lpstrUsbVid);
+ 	if (hProjectionClient == NULL)
+ 	{
+ 		lastHR = E_UNEXPECTED;
+ 		return FALSE;
+ 	}
+-	pRender->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+-	hSyncEvent = CreateEventW(NULL,FALSE,FALSE,NULL);
+-	pBufOfRaw = (PBYTE)malloc(PROJECTION_CLIENT_MAX_IMAGE_BUF_SIZE);
+-	hThreadReader = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)&CD2DRenderWindow::_StaticReaderThread,this,0,NULL);
+-	hThreadRender = CreateThread(NULL,0,(LPTHREAD_START_ROUTINE)&CD2DRenderWindow::_StaticRenderThread,this,0,NULL);
+-	SetThreadPriority(hThreadReader,THREAD_PRIORITY_HIGHEST);
+-	SetThreadPriority(hThreadRender,THREAD_PRIORITY_TIME_CRITICAL);
++	if (hSyncEvent == NULL)
++	{
++		hSyncEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
++	}
++	if (hThreadReader == NULL)
++	{
++		hThreadReader = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)&CD2DRenderWindow::_StaticReaderThread, this, 0, NULL);
++		SetThreadPriority(hThreadReader, THREAD_PRIORITY_HIGHEST);
++	}
++	if (hThreadRender == NULL)
++	{
++		hThreadRender = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)&CD2DRenderWindow::_StaticRenderThread, this, 0, NULL);
++		SetThreadPriority(hThreadRender, THREAD_PRIORITY_TIME_CRITICAL);
++	}
+ 	return TRUE;
+ }
+ 
+@@ -122,8 +139,27 @@
+ 	return TRUE;
+ }
+ 
+-BOOL CD2DRenderWindow::MoveWindow(int x,int y,DWORD dwWidth,DWORD dwHeight)
++BOOL CD2DRenderWindow::MoveWindow(int x,int y,DWORD dwWidth,DWORD dwHeight, BOOL bRecalc)
+ {
++	if (bRecalc) {
++		UINT rWidth, rHeight;
++		if (ForceOrientation == WP_ProjectionScreenOrientation_Hori_KeyBack || ForceOrientation == WP_ProjectionScreenOrientation_Hori_KeySearch) {
++			rWidth = nHeight;
++			rHeight = nWidth;
++		}
++		else {
++			rWidth = nWidth;
++			rHeight = nHeight;
++		}
++		if (dwWidth * rHeight > rWidth * dwHeight) {
++			dwWidth = dwHeight * rWidth / rHeight;
++			InvalidateRect(GetParent(hRender), NULL, TRUE);
++		}
++		else if (dwWidth * rHeight < rWidth * dwHeight) {
++			dwHeight = dwWidth * rHeight / rWidth;
++			InvalidateRect(GetParent(hRender), NULL, TRUE);
++		}
++	}
+ 	return ::MoveWindow(hRender,x,y,dwWidth,dwHeight,TRUE);
+ }
+ 
+@@ -144,6 +180,10 @@
+ 		pRender->Resize(D2D1::SizeU(nWidth,nHeight));
+ 		pRender->SetTransform(D2D1::Matrix3x2F::Rotation(0));
+ 	}
++	ForceOrientation = ori;
++	if (ForceOrientation == WP_ProjectionScreenOrientation_Default) {
++		ForceOrientation = WP_ProjectionScreenOrientation_Normal;
++	}
+ 	LeaveCriticalSection(&cs);
+ 	return TRUE;
+ }
+@@ -151,15 +191,24 @@
+ UINT CD2DRenderWindow::ReaderThread()
+ {
+ 	_FOREVER_LOOP{
+-		if (!SyncReadWP16BitScreenImageWithWICBitmap(hProjectionClient,pBufOfRaw,&Orientation,pWICFactory,&pRawBitmap,TRUE))
++		if (!SyncReadWP16BitScreenImageWithWICBitmap(hProjectionClient,&Orientation,pWICFactory,&pRawBitmap,TRUE))
+ 		{
++			if (pRawBitmap)
++			{
++				pRawBitmap->Release();
++				pRawBitmap = NULL;
++			}
++			CloseHandle(hSyncEvent);
++			hSyncEvent = NULL;
++			hThreadReader = NULL;
+ 			PostMessageW(GetParent(hRender),WM_WP81_PC_HANGUP,NULL,NULL);
+ 			break;
+ 		}
+-		if (nWidth == 0)
+-			pRawBitmap->GetSize(&nWidth,&nHeight);
+-		if (pRawBitmap)
++		if (pRawBitmap) {
++			if (nWidth == 0)
++				pRawBitmap->GetSize(&nWidth, &nHeight);
+ 			SetEvent(hSyncEvent);
++		}
+ 	}
+ 	return NULL;
+ }
+@@ -205,7 +254,8 @@
+ 	HANDLE hAvTask = AvSetMmThreadCharacteristicsW(L"Low Latency",&dwAvTaskIndex);
+ 	AvSetMmThreadPriority(hAvTask,AVRT_PRIORITY_CRITICAL);
+ 	_FOREVER_LOOP{
+-		if (WaitForSingleObject(hSyncEvent,INFINITE) == WAIT_OBJECT_0)
++		DWORD ret = WaitForSingleObject(hSyncEvent, 1000);
++		if (ret == WAIT_OBJECT_0)
+ 		{
+ 			if (nWidth == 0 || nHeight == 0)
+ 				continue;
+@@ -250,26 +300,55 @@
+ 			}
+ 			pRenderBitmap->Release();
+ 		}
++		else if (ret != WAIT_TIMEOUT){
++			break;
++		}
+ 	}
+ 	AvRevertMmThreadCharacteristics(hAvTask);
++	hThreadRender = NULL;
+ 	return NULL;
+ }
+ 
+ LRESULT CD2DRenderWindow::WndProc(HWND hWnd,UINT uMsg,WPARAM wParam,LPARAM lParam)
+ {
+-	if (uMsg == WM_PAINT)
++	switch (uMsg)
++	{
++	case WM_PAINT:
+ 	{
+ 		PAINTSTRUCT ps;
+-		HDC hDC = BeginPaint(hWnd,&ps);
++		HDC hDC = BeginPaint(hWnd, &ps);
+ 		HBRUSH hBursh = CreateSolidBrush(0);
+ 		RECT rc;
+-		GetClientRect(hWnd,&rc);
+-		FillRect(hDC,&rc,hBursh);
++		GetClientRect(hWnd, &rc);
++		FillRect(hDC, &rc, hBursh);
+ 		DeleteObject(hBursh);
+-		EndPaint(hWnd,&ps);
++		EndPaint(hWnd, &ps);
++	}
++		break;
++	case WM_POINTERDOWN:
++	case WM_POINTERUP:
++	case WM_POINTERUPDATE:
++	{
++		POINT pos;
++		RECT rect;
++		SIZE sz;
++		pos.x = LOWORD(lParam);
++		pos.y = HIWORD(lParam);
++		ScreenToClient(hWnd, &pos);
++		GetClientRect(hWnd, &rect);
++		sz.cx = rect.right - rect.left;
++		sz.cy = rect.bottom - rect.top;
++		SendWinPhoneTouchEvent(hProjectionClient, uMsg, wParam, MAKELONG(pos.x, pos.y), MAKELONG(sz.cx, sz.cy), ForceOrientation);
++	}
++		return 0;
+ 	}
+ 	return DefWindowProcW(hWnd,uMsg,wParam,lParam);
+ }
++BOOL CD2DRenderWindow::SendKey(UINT uMsg, WPARAM vkey)
++{
++	SendWinPhoneTouchEvent(hProjectionClient, uMsg, vkey, 0, 0, 0);
++	return TRUE;
++}
+ 
+ VOID CALLBACK CD2DRenderWindow::_StaticReaderThread(PVOID p)
+ {
+diff -ruN src.org/MyProjectionClient/D2DRenderWindow.h src/MyProjectionClient/D2DRenderWindow.h
+--- src.org/MyProjectionClient/D2DRenderWindow.h	2018-10-31 11:49:12.254933700 +0900
++++ src/MyProjectionClient/D2DRenderWindow.h	2018-11-04 13:25:15.615142900 +0900
+@@ -20,7 +20,7 @@
+ 	BOOL bPaused = FALSE;
+ 	CRITICAL_SECTION cs;
+ private:
+-	PBYTE pBufOfRaw = NULL,pBufOfConverted = NULL;
++	PBYTE pBufOfConverted = NULL;
+ 	IWICBitmap* pRawBitmap = NULL;
+ 	ID2D1Bitmap* pBltBitmap = NULL;
+ private:
+@@ -37,6 +37,7 @@
+ 	DWORD dwImageRawBits = 0; //no used.
+ 	DWORD dwImageRawStride = 0; //no used.
+ 	UINT Orientation = WP_ProjectionScreenOrientation_Default,PrevOrientation = WP_ProjectionScreenOrientation_Default;
++	UINT ForceOrientation = WP_ProjectionScreenOrientation_Normal;
+ private:
+ 	IComInterfaceQueue<IWICBitmapSource>* pNotifySharedQueue = NULL;
+ 	HANDLE hEventRender = NULL;
+@@ -51,10 +52,11 @@
+ 	BOOL Initialize(LPWSTR lpstrUsbVid);
+ 	BOOL Pause();
+ 	BOOL Resume();
+-	BOOL MoveWindow(int x,int y,DWORD dwWidth,DWORD dwHeight);
++	BOOL MoveWindow(int x,int y,DWORD dwWidth,DWORD dwHeight, BOOL bRecalc=FALSE);
+ 	BOOL ForceChangeOrientation(WP81ProjectionScreenOrientation ori);
+ 	WNDPROC SetNewWndProc(WNDPROC newproc);
+ 	UINT32 GetFps();
++	BOOL SendKey(UINT uMsg, WPARAM vkey);
+ public:
+ 	VOID SetInformationRecorder(DWORD dwFps,HANDLE hEvent,IComInterfaceQueue<IWICBitmapSource>* pSharedQueue);
+ 	VOID ClearRecorder();
+diff -ruN src.org/MyProjectionClient/D2DRenderWindowHelp.cpp src/MyProjectionClient/D2DRenderWindowHelp.cpp
+--- src.org/MyProjectionClient/D2DRenderWindowHelp.cpp	2018-10-31 11:49:12.327938700 +0900
++++ src/MyProjectionClient/D2DRenderWindowHelp.cpp	2018-11-06 16:18:18.787013500 +0900
+@@ -16,15 +16,16 @@
+ 	return FALSE;
+ }
+ 
+-BOOL SyncReadWP16BitScreenImageWithWICBitmap(HANDLE hProjectionClient,PBYTE pBuffer,PUINT pOrientation,IWICImagingFactory* pWICFactory,IWICBitmap** ppWICBitmap,BOOL bReleaseOldWICBitmap)
++BOOL SyncReadWP16BitScreenImageWithWICBitmap(HANDLE hProjectionClient,PUINT pOrientation,IWICImagingFactory* pWICFactory,IWICBitmap** ppWICBitmap,BOOL bReleaseOldWICBitmap)
+ {
+ 	if (ReadWinPhoneScreenImageAsync(hProjectionClient))
+ 	{
+ 		UINT nWidth = 0,nHeight = 0;
+ 		DWORD dwImageBits;
+-		if (WaitWinPhoneScreenImageComplete(hProjectionClient,PROJECTION_CLIENT_MAX_IMAGE_BUF_SIZE,pBuffer,&nWidth,&nHeight,&dwImageBits,pOrientation,INFINITE,TRUE))
++		DWORD dwStride;
++		PBYTE pBuf;
++		if (WaitWinPhoneScreenImageComplete(hProjectionClient,&pBuf,&nWidth,&nHeight,&dwImageBits,&dwStride,pOrientation,1000,TRUE))
+ 		{
+-			DWORD dwStride = nWidth * 2;
+ 			if (dwImageBits == 16)
+ 			{
+ 				if (*ppWICBitmap && bReleaseOldWICBitmap)
+@@ -32,7 +33,7 @@
+ 					(*ppWICBitmap)->Release();
+ 					*ppWICBitmap = NULL;
+ 				}
+-				pWICFactory->CreateBitmapFromMemory(nWidth,nHeight,GUID_WICPixelFormat16bppBGR565,dwStride,dwStride * nHeight,pBuffer,ppWICBitmap);
++				pWICFactory->CreateBitmapFromMemory(nWidth,nHeight,GUID_WICPixelFormat16bppBGR565,dwStride,dwStride * nHeight,pBuf,ppWICBitmap);
+ 			}
+ 		}
+ 		return TRUE;
+diff -ruN src.org/MyProjectionClient/D2DRenderWindowHelp.h src/MyProjectionClient/D2DRenderWindowHelp.h
+--- src.org/MyProjectionClient/D2DRenderWindowHelp.h	2018-10-31 11:49:12.402937200 +0900
++++ src/MyProjectionClient/D2DRenderWindowHelp.h	2018-08-01 12:10:39.168722100 +0900
+@@ -3,4 +3,4 @@
+ #include "stdafx.h"
+ 
+ BOOL ConvertWICBitmapFormat(IWICImagingFactory* pWICFactory,REFWICPixelFormatGUID toFormat,IWICBitmapSource* pSrc,IWICBitmapSource** ppDst);
+-BOOL SyncReadWP16BitScreenImageWithWICBitmap(HANDLE hProjectionClient,PBYTE pBuffer,PUINT pOrientation,IWICImagingFactory* pWICFactory,IWICBitmap** ppWICBitmap,BOOL bReleaseOldWICBitmap);
+\ No newline at end of file
++BOOL SyncReadWP16BitScreenImageWithWICBitmap(HANDLE hProjectionClient,PUINT pOrientation,IWICImagingFactory* pWICFactory,IWICBitmap** ppWICBitmap,BOOL bReleaseOldWICBitmap);
+\ No newline at end of file
+diff -ruN src.org/MyProjectionClient/main.cpp src/MyProjectionClient/main.cpp
+--- src.org/MyProjectionClient/main.cpp	2018-10-31 11:49:13.204048200 +0900
++++ src/MyProjectionClient/main.cpp	2018-11-04 13:25:15.657142100 +0900
+@@ -43,7 +43,7 @@
+ HMENU hMenuDevice,hMenuDisplay,hMenuCapture,hMenuHelper;
+ DWORD dwImageWidth,dwImageHeight;
+ UINT nDevCount;
+-LPWSTR* ppstrDevPath;
++LPWSTR ppstrDevPath[32];
+ BOOL bPlayState = TRUE;
+ BOOL bExitVideoRec = FALSE;
+ WP81ProjectionScreenOrientation ForceOrientation = WP_ProjectionScreenOrientation_Default,CurrentOrientation = WP_ProjectionScreenOrientation_Default;
+@@ -163,8 +163,8 @@
+ 
+ LRESULT CALLBACK RenderWindowMessageProc(HWND hWnd,UINT uMsg,WPARAM wParam,LPARAM lParam)
+ {
+-	if (uMsg == WM_LBUTTONDBLCLK)
+-		SendMessageW(GetParent(hWnd),WM_KEYDOWN,VK_SPACE,NULL);
++	//if (uMsg == WM_LBUTTONDBLCLK)
++	//	SendMessageW(GetParent(hWnd),WM_KEYDOWN,VK_SPACE,NULL);
+ 	if (uMsg == WM_PAINT)
+ 	{
+ 		PAINTSTRUCT ps;
+@@ -185,6 +185,62 @@
+ 	return CallWindowProcW(RenderWindowProc,hWnd,uMsg,wParam,lParam);
+ }
+ 
++void SetupDeviceMenu()
++{
++	WCHAR szBuffer[MAX_PATH] = {};
++	HICON hPhoneIcon = (HICON)LoadImage(GetModuleHandleA(CORE_LIB_FILE_NAME), MAKEINTRESOURCE(100), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
++	HBITMAP hPhoneBitmap = HBitmapFromHIcon32bpp(hPhoneIcon);
++
++	nDevCount = 0;
++	RtlZeroMemory(szBuffer, ARRAYSIZE(szBuffer));
++	HANDLE hFindUsb = FindFirstUsbBusDev();
++	if (hFindUsb)
++	{
++		do {
++			if (FindUsbBusGetDevPath(hFindUsb, szBuffer, ARRAYSIZE(szBuffer)))
++			{
++				if (!FindUsbBusGetDisplayName(hFindUsb, szBuffer, ARRAYSIZE(szBuffer)))
++				{
++					if (nDevCount == 0)
++						lstrcpyW(szBuffer, L"Windows Phone");
++					else
++						wsprintfW(szBuffer, L"Windows Phone %d", nDevCount + 1);
++				}
++				LPWSTR lpstrDevPath = (LPWSTR)GlobalAlloc(GPTR, MAX_PATH * 2);
++				FindUsbBusGetDevPath(hFindUsb, lpstrDevPath, MAX_PATH);
++				ppstrDevPath[nDevCount] = lpstrDevPath;
++				AppendMenuW(hMenuDevice, MF_BYCOMMAND, MENU_CMD_PHONE_DEVICE_SELECT + nDevCount, szBuffer);
++				if (hPhoneBitmap)
++					SetMenuItemBitmaps(hMenuDevice, MENU_CMD_PHONE_DEVICE_SELECT + nDevCount, MF_BYCOMMAND, hPhoneBitmap, hPhoneBitmap);
++				nDevCount++;
++				if (nDevCount > 30)
++					break;
++			}
++		} while (FindNextUsbBusDev(hFindUsb));
++		FindUsbBusClose(hFindUsb);
++
++		if (nDevCount == 1) //one phone.
++			SetMenuDefaultItem(hMenuDevice, 0, MF_BYPOSITION);
++		else if (nDevCount == 0)
++			AppendMenuA(hMenuDevice, MF_BYCOMMAND | MF_GRAYED, 0, "Device Not Detected.");
++	}
++
++	AppendMenuA(hMenuDevice, MF_BYPOSITION, 0, NULL);
++	AppendMenuA(hMenuDevice, MF_BYCOMMAND, MENU_CMD_EXIT, "Exit");
++}
++void ReleaseDeviceMenu()
++{
++	for (UINT i = 0; i < nDevCount; i++)
++	{
++		DeleteMenu(hMenuDevice, i, MF_BYPOSITION);
++		GlobalFree(ppstrDevPath[i]);
++	}
++	DeleteMenu(hMenuDevice, 0, MF_BYPOSITION);
++	DeleteMenu(hMenuDevice, 0, MF_BYPOSITION);
++	DeleteMenu(hMenuDevice, 0, MF_BYPOSITION);
++	nDevCount = 0;
++}
++
+ LRESULT CALLBACK MainWindowMessageProc(HWND hWnd,UINT uMsg,WPARAM wParam,LPARAM lParam)
+ {
+ 	static ULONG64 ulTickCountOK = 0;
+@@ -220,10 +276,10 @@
+ 	case WM_WINDOWPOSCHANGING:
+ 	case WM_WINDOWPOSCHANGED:
+ 		GetClientRect(hWnd,&rc);
+-		RenderWindow->MoveWindow(0,0,rc.right,rc.bottom);
++		RenderWindow->MoveWindow(0,0,rc.right,rc.bottom, TRUE);
+ 		break;
+ 	case WM_KEYDOWN:
+-		if (wParam == VK_SPACE)
++		/*if (wParam == VK_SPACE)
+ 		{
+ 			if (bPlayState)
+ 			{
+@@ -233,6 +289,19 @@
+ 				 bPlayState = TRUE;
+ 				 RenderWindow->Resume();
+ 			}
++		}*/
++		if ((wParam == VK_BACK) || (wParam == VK_HOME))
++		{
++			if ((lParam & 0x40000000)==0)
++			{
++				RenderWindow->SendKey(uMsg, wParam);
++			}
++		}
++		break;
++	case WM_KEYUP:
++		if ((wParam == VK_BACK) || (wParam == VK_HOME))
++		{
++			RenderWindow->SendKey(uMsg, wParam);
+ 		}
+ 		break;
+ 	case WM_COMMAND:
+@@ -415,13 +484,7 @@
+ 			WCHAR szDevPath[MAX_PATH] = {},szDevName[MAX_PATH] = {};
+ 			lstrcpyW(szDevPath,ppstrDevPath[nIndex]);
+ 			GetMenuStringW(hMenuDevice,nIndex,szDevName,ARRAYSIZE(szDevName),MF_BYPOSITION);
+-			for (UINT i = 0;i < nDevCount;i++)
+-			{
+-				DeleteMenu(hMenuDevice,i,MF_BYPOSITION);
+-				GlobalFree(ppstrDevPath[i]);
+-			}
+-			GlobalFree(ppstrDevPath);
+-			DeleteMenu(hMenuDevice,0,MF_BYPOSITION);
++			ReleaseDeviceMenu();
+ 			if (RenderWindow->Initialize(szDevPath))
+ 			{
+ 				lpszPhoneDevName = StrDupW(szDevName);
+@@ -446,8 +509,13 @@
+ 		break;
+ 	case WM_WP81_PC_HANGUP:
+ 		KillTimer(hWnd,0);
+-		ShellMessageBoxA(GetModuleHandle(NULL),hWnd,"Device has been disconnected!","Warning",MB_ICONERROR);
+-		PostMessageW(hWnd,WM_CLOSE,NULL,NULL);
++		//ShellMessageBoxA(GetModuleHandle(NULL),hWnd,"Device has been disconnected!","Warning",MB_ICONERROR);
++		//PostMessageW(hWnd,WM_CLOSE,NULL,NULL);
++		free(lpszPhoneDevName);
++		lpszPhoneDevName = NULL;
++		InvalidateRect(hWnd, NULL, TRUE);
++		Sleep(500);
++		SetupDeviceMenu();
+ 		break;
+ 	case WM_WP81_PC_SHOW:
+ 		OutputDebugStringA("Show Screen Projection Image.");
+@@ -458,6 +526,8 @@
+ 		ulTickCountOK = GetTickCount64();
+ 		dwImageWidth = wParam;
+ 		dwImageHeight = lParam;
++		MoveWindowClientArea(hWnd, dwImageWidth, dwImageHeight);
++		RenderWindow->MoveWindow(0, 0, dwImageWidth, dwImageHeight);
+ 		if (IsKeyCLSIDExists(L"{4BE8D3C0-0515-4A37-AD55-E4BAE19AF471}")) //Intel QuickSync Supported.
+ 			PostMessageW(hWnd,WM_COMMAND,MENU_CMD_CAPTURE_TO_VIDEO_FILE_USE_HARDWARE,NULL);
+ 		break;
+@@ -482,6 +552,16 @@
+ 			}
+ 		}
+ 		break;
++	case WM_DEVICECHANGE:
++		if ((lpszPhoneDevName == NULL) && (nDevCount == 0)) {
++			ReleaseDeviceMenu();
++			SetupDeviceMenu();
++			if (nDevCount == 1) //one phone.
++			{
++				PostMessage(MainWindow, WM_COMMAND, MENU_CMD_PHONE_DEVICE_SELECT, NULL);
++			}
++		}
++		break;
+ 	}
+ 	return DefWindowProcW(hWnd,uMsg,wParam,lParam);
+ }
+@@ -492,8 +572,6 @@
+ 	WCHAR szBuffer[MAX_PATH] = {};
+ 	SHGetSpecialFolderPathW(NULL,szBuffer,CSIDL_PROGRAM_FILESX86,FALSE);
+ 	PathAppendW(szBuffer,L"Windows Media Player\\setup_wm.exe");
+-	HICON hPhoneIcon = (HICON)LoadImage(GetModuleHandleA(CORE_LIB_FILE_NAME),MAKEINTRESOURCE(100),IMAGE_ICON,16,16,LR_DEFAULTCOLOR);
+-	HBITMAP hPhoneBitmap = HBitmapFromHIcon32bpp(hPhoneIcon);
+ 	HICON hWMPIcon = (HICON)LoadImage(LoadLibraryExW(szBuffer,NULL,LOAD_LIBRARY_AS_IMAGE_RESOURCE),MAKEINTRESOURCE(70),IMAGE_ICON,16,16,LR_DEFAULTCOLOR);
+ 	HBITMAP hWMPBitmap = HBitmapFromHIcon32bpp(hWMPIcon);
+ 
+@@ -503,42 +581,6 @@
+ 	hMenuCapture = CreateMenu();
+ 	hMenuHelper = CreateMenu();
+ 
+-	ppstrDevPath = (LPWSTR*)GlobalAlloc(GPTR,32 * sizeof(LPWSTR)); //max 32 items.
+-	RtlZeroMemory(szBuffer,ARRAYSIZE(szBuffer));
+-	HANDLE hFindUsb = FindFirstUsbBusDev();
+-	if (hFindUsb)
+-	{
+-		do{
+-			if (FindUsbBusGetDevPath(hFindUsb,szBuffer,ARRAYSIZE(szBuffer)))
+-			{
+-				if (!FindUsbBusGetDisplayName(hFindUsb,szBuffer,ARRAYSIZE(szBuffer)))
+-				{
+-					if (nDevCount == 0)
+-						lstrcpyW(szBuffer,L"Windows Phone");
+-					else
+-						wsprintfW(szBuffer,L"Windows Phone %d",nDevCount + 1);
+-				}
+-				LPWSTR lpstrDevPath = (LPWSTR)GlobalAlloc(GPTR,MAX_PATH * 2);
+-				FindUsbBusGetDevPath(hFindUsb,lpstrDevPath,MAX_PATH);
+-				ppstrDevPath[nDevCount] = lpstrDevPath;
+-				AppendMenuW(hMenuDevice,MF_BYCOMMAND,MENU_CMD_PHONE_DEVICE_SELECT + nDevCount,szBuffer);
+-				if (hPhoneBitmap)
+-					SetMenuItemBitmaps(hMenuDevice,MENU_CMD_PHONE_DEVICE_SELECT + nDevCount,MF_BYCOMMAND,hPhoneBitmap,hPhoneBitmap);
+-				nDevCount++;
+-				if (nDevCount > 30)
+-					break;
+-			}
+-		}while (FindNextUsbBusDev(hFindUsb));
+-		FindUsbBusClose(hFindUsb);
+-
+-		if (nDevCount == 1) //one phone.
+-			SetMenuDefaultItem(hMenuDevice,0,MF_BYPOSITION);
+-		else if (nDevCount == 0)
+-			AppendMenuA(hMenuDevice,MF_BYCOMMAND|MF_GRAYED,0,"Device Not Detected.");
+-	}
+-
+-	AppendMenuA(hMenuDevice,MF_BYPOSITION,0,NULL);
+-	AppendMenuA(hMenuDevice,MF_BYCOMMAND,MENU_CMD_EXIT,"Exit");
+ 	AppendMenuA(hMenuDisplay,MF_BYCOMMAND,MENU_CMD_DISPLAY_AUTO,"Orientation: Auto");
+ 	AppendMenuA(hMenuDisplay,MF_BYCOMMAND,MENU_CMD_DISPLAY_NORMAL,"Orientation: Force to portrait up.");
+ 	AppendMenuA(hMenuDisplay,MF_BYCOMMAND,MENU_CMD_DISPLAY_HORI_LEFT,"Orientation: Force to landscape left.");
+@@ -576,6 +618,12 @@
+ 	ShowWindow(MainWindow,nCmdShow);
+ 	DestroyIcon(hIcon);
+ 
++	SetupDeviceMenu();
++	if (nDevCount == 1) //one phone.
++	{
++		PostMessage(MainWindow, WM_COMMAND, MENU_CMD_PHONE_DEVICE_SELECT, NULL);
++	}
++
+ 	MSG msg;
+ 	while (GetMessageW(&msg,NULL,0,0))
+ 	{
+diff -ruN src.org/MyProjectionClient/MyProjectionClient.vcxproj src/MyProjectionClient/MyProjectionClient.vcxproj
+--- src.org/MyProjectionClient/MyProjectionClient.vcxproj	2018-10-31 11:49:12.555938900 +0900
++++ src/MyProjectionClient/MyProjectionClient.vcxproj	2018-10-31 09:33:05.020808600 +0900
+@@ -1,5 +1,5 @@
+ Ôªø<?xml version="1.0" encoding="utf-8"?>
+-<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
++<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <ItemGroup Label="ProjectConfigurations">
+     <ProjectConfiguration Include="Release|ARM">
+       <Configuration>Release</Configuration>
+@@ -17,26 +17,27 @@
+   <PropertyGroup Label="Globals">
+     <ProjectGuid>{20D4D1CE-EA2F-4B92-861D-EA6B73D879A4}</ProjectGuid>
+     <RootNamespace>MyProjectionClient</RootNamespace>
++    <WindowsTargetPlatformVersion>10.0.17134.0</WindowsTargetPlatformVersion>
+   </PropertyGroup>
+   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+     <ConfigurationType>Application</ConfigurationType>
+     <UseDebugLibraries>false</UseDebugLibraries>
+-    <PlatformToolset>v120</PlatformToolset>
++    <PlatformToolset>v141</PlatformToolset>
+     <WholeProgramOptimization>true</WholeProgramOptimization>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+     <ConfigurationType>Application</ConfigurationType>
+     <UseDebugLibraries>false</UseDebugLibraries>
+-    <PlatformToolset>v120</PlatformToolset>
++    <PlatformToolset>v141</PlatformToolset>
+     <WholeProgramOptimization>true</WholeProgramOptimization>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'" Label="Configuration">
+     <ConfigurationType>Application</ConfigurationType>
+     <UseDebugLibraries>false</UseDebugLibraries>
+-    <PlatformToolset>v120</PlatformToolset>
++    <PlatformToolset>v141</PlatformToolset>
+     <WholeProgramOptimization>true</WholeProgramOptimization>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+diff -ruN src.org/MyProjectionClient/Release/MyProjectionClient.Build.CppClean.log src/MyProjectionClient/Release/MyProjectionClient.Build.CppClean.log
+--- src.org/MyProjectionClient/Release/MyProjectionClient.Build.CppClean.log	1970-01-01 09:00:00.000000000 +0900
++++ src/MyProjectionClient/Release/MyProjectionClient.Build.CppClean.log	2018-11-06 17:03:22.815316000 +0900
+@@ -0,0 +1,19 @@
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\myprojectionclient.pch
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\vc141.pdb
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\asyncd2drecorder.obj
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\d2drenderwindow.obj
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\d2drenderwindowhelp.obj
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\main.obj
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\wasapiwaverecorder.obj
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\win_mpeg4_h264_filecontainer.obj
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\release\myprojectionclient.exe
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\release\myprojectionclient.pdb
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\release\myprojectionclient.ipdb
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\release\myprojectionclient.iobj
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\myprojec.20d4d1ce.tlog\cl.command.1.tlog
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\myprojec.20d4d1ce.tlog\cl.read.1.tlog
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\myprojec.20d4d1ce.tlog\cl.write.1.tlog
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\myprojec.20d4d1ce.tlog\link.command.1.tlog
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\myprojec.20d4d1ce.tlog\link.read.1.tlog
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\myprojec.20d4d1ce.tlog\link.write.1.tlog
++c:\hibunexc\visual studio 2017\projects\winphoneprojection-master\winphoneprojection-master\src\myprojectionclient\release\myprojec.20d4d1ce.tlog\myprojectionclient.write.1u.tlog
+diff -ruN src.org/MyProjectionClient/Release/MyProjectionClient.log src/MyProjectionClient/Release/MyProjectionClient.log
+--- src.org/MyProjectionClient/Release/MyProjectionClient.log	1970-01-01 09:00:00.000000000 +0900
++++ src/MyProjectionClient/Release/MyProjectionClient.log	2018-11-06 17:03:22.821316100 +0900
+@@ -0,0 +1 @@
++Ôªø
+\ No newline at end of file
+Files src.org/WP81ProjectionClient/resource.aps and src/WP81ProjectionClient/resource.aps differ
+diff -ruN src.org/WP81ProjectionClient/WP81ProjectionClient.cpp src/WP81ProjectionClient/WP81ProjectionClient.cpp
+--- src.org/WP81ProjectionClient/WP81ProjectionClient.cpp	2018-10-31 11:49:13.553062600 +0900
++++ src/WP81ProjectionClient/WP81ProjectionClient.cpp	2018-11-06 16:58:30.796359000 +0900
+@@ -1,21 +1,65 @@
+ #include "WP81ProjectionClient.h"
+ #include <mfapi.h>
+ 
+-//ππ‘Ï∫Ø ˝
++__forceinline BOOL InitWP81UsbPipePolicy(WINUSB_INTERFACE_HANDLE hUsbInterface, PWP_SCRREN_TO_PC_PIPE p)
++{
++	BOOL bResult = FALSE;
++	USB_INTERFACE_DESCRIPTOR usbInterfaceDesc = {};
++	WinUsb_QueryInterfaceSettings(hUsbInterface, 0, &usbInterfaceDesc);
++	if (usbInterfaceDesc.bNumEndpoints == 2) //“ª∏ˆøÿ÷∆£¨“ª∏ˆ∂¡∆¡ƒª
++	{
++		BOOLEAN bOpenState = TRUE;
++		WinUsb_QueryPipe(hUsbInterface, 0, 0, &p->PipeOfData);
++		WinUsb_QueryPipe(hUsbInterface, 0, 1, &p->PipeOfControl);
++		if (p->PipeOfControl.PipeType == UsbdPipeTypeBulk && p->PipeOfData.PipeType == UsbdPipeTypeBulk)
++		{
++			if (WinUsb_SetPipePolicy(hUsbInterface, p->PipeOfControl.PipeId, 7, 1, &bOpenState) && WinUsb_SetPipePolicy(hUsbInterface, p->PipeOfData.PipeId, 7, 1, &bOpenState))
++				bResult = TRUE;
++		}
++	}
++	return bResult;
++}
++
++__forceinline BOOL SendWP81UsbCtlCode(WINUSB_INTERFACE_HANDLE hUsbInterface, UINT code)
++{
++	WINUSB_SETUP_PACKET usbPacket = {};
++	usbPacket.RequestType = 0x21; //magic
++	usbPacket.Request = code;
++	DWORD dwTemp = 0;
++	return WinUsb_ControlTransfer(hUsbInterface, usbPacket, NULL, 0, &dwTemp, NULL);
++}
++
++//ππ‘ÅEØ ˝
+ CWP81ProjectionClient::CWP81ProjectionClient(LPCWSTR lpszUsbVid)
+ {
+ 	lpstrUsbVid = StrDupW(lpszUsbVid);
+ 	hFile = CreateFileW(lpstrUsbVid,GENERIC_READ|GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,FILE_FLAG_OVERLAPPED,NULL);
+ 	hEvent = CreateEventExW(NULL,NULL,CREATE_EVENT_MANUAL_RESET,EVENT_ALL_ACCESS);
++	hWrite = CreateEventExW(NULL, NULL, CREATE_EVENT_MANUAL_RESET, EVENT_ALL_ACCESS);
+ 	InitializeCriticalSectionEx(&cs,0,CRITICAL_SECTION_NO_DEBUG_INFO);
+ 	RtlZeroMemory(&usbPipe,sizeof(usbPipe));
+ 	RtlZeroMemory(&ioOverlapped,sizeof(ioOverlapped));
+ 	ioOverlapped.hEvent = hEvent;
++	RtlZeroMemory(&ioWrite, sizeof(ioWrite));
++	ioWrite.hEvent = hWrite;
++	EnableMouseInPointer(TRUE);
++	send[0] = 0x44555608;
++	send[1] = 0x00000003;
++	send[2] = 0x000000c0;
++
++	send[3] = 0x00000000;
++	send[4] = 0x00000000;
++	send[5] = 0x00000000;
++
++	send[6] = 0x00000000;
++	send[7] = 0x00000000;
++	last = 0;
+ }
+ 
+ //Œˆππ∫Ø ˝
+ CWP81ProjectionClient::~CWP81ProjectionClient()
+ {
++	SendWP81UsbCtlCode(hUsb, 1);
+ 	if (hUsb)
+ 		WinUsb_Free(hUsb);
+ 	if (pBufOfData)
+@@ -23,13 +67,18 @@
+ 	if (lpstrUsbVid)
+ 		CoTaskMemFree(lpstrUsbVid);
+ 	DeleteCriticalSection(&cs);
+-	SetEvent(hEvent);
+-	CloseHandle(hEvent);
++	SetEvent(hWrite);
++	CloseHandle(hWrite);
++	if (hEvent) {
++		SetEvent(hEvent);
++		CloseHandle(hEvent);
++		hEvent = NULL;
++	}
+ 	if (hFile != INVALID_HANDLE_VALUE)
+ 		CloseHandle(hFile);
+ }
+ 
+-BOOL STDMETHODCALLTYPE CWP81ProjectionClient::Initialize(DWORD dwMaxBufferSize)
++BOOL CWP81ProjectionClient::Initialize(DWORD dwMaxBufferSize)
+ {
+ 	if (pBufOfData)
+ 		return FALSE;
+@@ -51,7 +100,16 @@
+ 	return TRUE;
+ }
+ 
+-BOOL STDMETHODCALLTYPE CWP81ProjectionClient::ReadImageAsync()
++void CWP81ProjectionClient::Reset()
++{
++	WinUsb_ResetPipe(hUsb, usbPipe.PipeOfControl.PipeId);
++	WinUsb_ResetPipe(hUsb, usbPipe.PipeOfData.PipeId);
++	SetEvent(hEvent);
++	CloseHandle(hEvent);
++	hEvent = NULL;
++}
++
++BOOL CWP81ProjectionClient::ReadImageAsync()
+ {
+ 	if (hUsb == NULL)
+ 		return FALSE;
+@@ -69,21 +127,21 @@
+ 	}
+ 	if (SendWP81UsbCtlCode(hUsb,WP_SCREEN_TO_PC_CTL_CODE_READY))
+ 	{
+-		WinUsb_ReadPipe(hUsb,usbPipe.PipeOfData.PipeId,(PUCHAR)pBufOfData,dwBufferSize,NULL,&ioOverlapped);
+-		if (GetLastError() == ERROR_IO_PENDING)
+-			bIoPending = bResult = TRUE;
++		if (!WinUsb_ReadPipe(hUsb, usbPipe.PipeOfData.PipeId, (PUCHAR)pBufOfData, dwBufferSize, NULL, &ioOverlapped))
++		{
++			if (GetLastError() == ERROR_IO_PENDING)
++				bIoPending = bResult = TRUE;
++		}
+ 	}
+ 	LeaveCriticalSection(&cs);
+ 	return bResult;
+ }
+ 
+-BOOL STDMETHODCALLTYPE CWP81ProjectionClient::WaitReadImageComplete(DWORD dwSizeOfBuf,PBYTE pBuffer,PUINT32 pWidth,PUINT32 pHeight,PDWORD pdwBits,PUINT pOrientation,DWORD dwTimeout,BOOL bFastCall)
++BOOL CWP81ProjectionClient::WaitReadImageComplete(PBYTE* ppBuffer,PUINT32 pWidth,PUINT32 pHeight,PDWORD pdwBits, PDWORD pdwStride,PUINT pOrientation,DWORD dwTimeout,BOOL bFastCall)
+ {
+ 	if (!bFastCall)
+ 	{
+-		if (dwSizeOfBuf == 0 || pBuffer == NULL)
+-			return FALSE;
+-		if (dwSizeOfBuf > dwBufferSize)
++		if (ppBuffer == NULL)
+ 			return FALSE;
+ 		if (hUsb == NULL)
+ 			return FALSE;
+@@ -94,6 +152,8 @@
+ 		EnterCriticalSection(&cs);
+ 	if (WaitForSingleObjectEx(hEvent,dwTimeout,FALSE) == WAIT_OBJECT_0)
+ 	{
++		DWORD dwTemp;
++		WinUsb_GetOverlappedResult(hUsb, &ioOverlapped, &dwTemp, TRUE);
+ 		ResetEvent(hEvent);
+ 		bIoPending = FALSE;
+ 		PWP_SCRREN_TO_PC_DATA pData = (PWP_SCRREN_TO_PC_DATA)pBufOfData;
+@@ -103,8 +163,12 @@
+ 				*pWidth = pData->wDisplayWidth;
+ 			if (pHeight)
+ 				*pHeight = pData->wDisplayHeight;
+-			if (pOrientation)
++			if (pOrientation) {
+ 				*pOrientation = pData->wScrOrientation;
++				if (*pOrientation == 0) {
++					*pOrientation = 1;
++				}
++			}
+ 			if (pdwBits)
+ 				*pdwBits = pData->dwImageBits;
+ 			if (dwPhoneStride == 0)
+@@ -121,11 +185,10 @@
+ 				dwBitSize = 3;
+ 			else if (pData->dwImageBits == 32)
+ 				dwBitSize = 4;
+-			DWORD dwStride = pData->wDisplayWidth * dwBitSize;
+-			PBYTE p = ((PBYTE)pData) + WP_SCREEN_TO_PC_IMAGE_DATA_OFFSET;
+-			if (pBuffer)
+-				MFCopyImage(pBuffer,dwStride,p,dwStride,dwStride,pData->wDisplayHeight);
+-				//RtlCopyMemory(pBuffer,p,dwSizeOfBuf);
++			if (pdwStride)
++				*pdwStride = pData->dwUnk3;
++			if (ppBuffer)
++				*ppBuffer = ((PBYTE)pData) + (pData->nImageDataLength - pData->dwUnk3 * pData->wDisplayHeight);
+ 			bResult = TRUE;
+ 		}
+ 	}
+@@ -134,25 +197,121 @@
+ 	return bResult;
+ }
+ 
+-BOOL STDMETHODCALLTYPE CWP81ProjectionClient::GetPhoneScreenPixel(PDWORD pdwWidth,PDWORD pdwHeight)
++long GetIndexBuf(DWORD* send, UINT uMsg, long id)
+ {
+-	if (hUsb == NULL)
+-		return FALSE;
+-	if (pdwWidth)
+-		*pdwWidth = dwPhoneWidth;
+-	if (pdwHeight)
+-		*pdwHeight = dwPhoneHeight;
+-	return TRUE;
++	long idx=0;
++	while (idx < send[7])
++	{
++		if (send[8 + idx * 4] == id)
++		{
++			return idx;
++		}
++		idx++;
++	}
++	if (uMsg == WM_POINTERDOWN)
++	{
++		if (send[7] < 10) {
++			send[8 + send[7] * 4] = id;
++			send[7]++;
++			return send[7] - 1;
++		}
++	}
++	return -1;
+ }
+-
+-BOOL STDMETHODCALLTYPE CWP81ProjectionClient::IsLowSpeedUsbPort(PBOOL pbLowSpeed)
++void ReleaseIndexBuf(DWORD* send, UINT uMsg, long idx)
+ {
+-	if (hUsb == NULL || pbLowSpeed == NULL)
+-		return FALSE;
+-	UCHAR UsbSpeed = 0;
+-	ULONG Len = sizeof UCHAR;
+-	if (!WinUsb_QueryDeviceInformation(hUsb,DEVICE_SPEED,&Len,&UsbSpeed))
+-		return FALSE;
+-	*pbLowSpeed = UsbSpeed == LowSpeed ? TRUE:FALSE;
++	if (uMsg == WM_POINTERUP) {
++		if (idx < (send[7] - 1))
++		{
++			memmove(&(send[8 + idx * 4]), &(send[8 + (idx + 1) * 4]), 16);
++		}
++		send[7]--;
++	}
++}
++BOOL CWP81ProjectionClient::SendTouchEvent(UINT uMsg, WPARAM wParam, LPARAM lPos, LPARAM lSize, UINT Orientation)
++{
++	long idx = 0;
++	if ((uMsg == WM_KEYDOWN)||(uMsg == WM_KEYUP))
++	{
++		send[6] = 0x00000001;
++		send[7] = (wParam == VK_BACK) ? 0 : 1;
++		send[8] = (uMsg == WM_KEYDOWN) ? 1 : 0;
++	}
++	else {
++		idx = GetIndexBuf(send, uMsg, GET_POINTERID_WPARAM(wParam));
++		if (idx < 0) {
++			return TRUE;
++		}
++
++		POINT pos;
++		SIZE sz;
++		sz.cx = LOWORD(lSize);
++		sz.cy = HIWORD(lSize);
++		switch (Orientation)
++		{
++		case 2:
++			pos.x = (sz.cy - HIWORD(lPos))* sz.cx / sz.cy;
++			pos.y = LOWORD(lPos)*sz.cy / sz.cx;
++			break;
++		case 4:
++			pos.x = sz.cx - LOWORD(lPos);
++			pos.y = sz.cy - HIWORD(lPos);
++			break;
++		case 8:
++			pos.x = HIWORD(lPos)* sz.cx / sz.cy;
++			pos.y = (sz.cx - LOWORD(lPos))*sz.cy / sz.cx;
++			break;
++		default:
++			pos.x = LOWORD(lPos);
++			pos.y = HIWORD(lPos);
++		}
++		DWORD newpos = MAKELONG(dwPhoneWidth * pos.x / sz.cx, dwPhoneHeight * pos.y / sz.cy);
++
++		send[6] = 0x00000000;
++		switch (uMsg) {
++		case WM_POINTERUPDATE:
++			if (send[11 + idx * 4] == newpos)
++			{
++				return TRUE;
++			}
++			send[9 + idx * 4] = 0x00000002;
++			send[10 + idx * 4] = 0x00000002;
++			break;
++		case WM_POINTERDOWN:
++			send[9 + idx * 4] = 0x00000002;
++			send[10 + idx * 4] = 0x00000000;
++			break;
++		case WM_POINTERUP:
++			send[9 + idx * 4] = 0x00000000;
++			send[10 + idx * 4] = 0x00000002;
++			break;
++		}
++		send[11 + idx * 4] = newpos;
++	}
++
++	DWORD crnt = GetTickCount();
++	if ((last + 12) > crnt)
++	{
++		Sleep(last + 12 - crnt);
++	}
++	DWORD dwErr = ERROR_SUCCESS;
++	EnterCriticalSection(&cs);
++	if(!WinUsb_WritePipe(hUsb, usbPipe.PipeOfControl.PipeId, (PUCHAR)send, 192, NULL, &ioWrite))
++	{
++		dwErr = GetLastError();
++	}
++	LeaveCriticalSection(&cs);
++	if (dwErr == ERROR_IO_PENDING)
++	{
++		if (WaitForSingleObjectEx(hWrite, INFINITE, FALSE) == WAIT_OBJECT_0)
++		{
++			DWORD dwTemp;
++			WinUsb_GetOverlappedResult(hUsb, &ioWrite, &dwTemp, TRUE);
++			ResetEvent(hWrite);
++		}
++	}
++	last = crnt;
++
++	ReleaseIndexBuf(send, uMsg, idx);
+ 	return TRUE;
+-}
+\ No newline at end of file
++}
+diff -ruN src.org/WP81ProjectionClient/WP81ProjectionClient.h src/WP81ProjectionClient/WP81ProjectionClient.h
+--- src.org/WP81ProjectionClient/WP81ProjectionClient.h	2018-10-31 11:49:13.665066500 +0900
++++ src/WP81ProjectionClient/WP81ProjectionClient.h	2018-11-06 16:42:44.891587200 +0900
+@@ -2,122 +2,50 @@
+ 
+ #include "WP81ProjectionCommon.h"
+ 
+-__forceinline BOOL InitWP81UsbPipePolicy(WINUSB_INTERFACE_HANDLE hUsbInterface,PWP_SCRREN_TO_PC_PIPE p)
+-{
+-	BOOL bResult = FALSE;
+-	USB_INTERFACE_DESCRIPTOR usbInterfaceDesc = {};
+-	WinUsb_QueryInterfaceSettings(hUsbInterface,0,&usbInterfaceDesc);
+-	if (usbInterfaceDesc.bNumEndpoints == 2) //“ª∏ˆøÿ÷∆£¨“ª∏ˆ∂¡∆¡ƒª
+-	{
+-		BOOLEAN bOpenState = TRUE;
+-		WinUsb_QueryPipe(hUsbInterface,0,0,&p->PipeOfData);
+-		WinUsb_QueryPipe(hUsbInterface,0,1,&p->PipeOfControl);
+-		if (p->PipeOfControl.PipeType == UsbdPipeTypeBulk && p->PipeOfData.PipeType == UsbdPipeTypeBulk)
+-		{
+-			if (WinUsb_SetPipePolicy(hUsbInterface,p->PipeOfControl.PipeId,7,1,&bOpenState) && WinUsb_SetPipePolicy(hUsbInterface,p->PipeOfData.PipeId,7,1,&bOpenState))
+-				bResult = TRUE;
+-		}
+-	}
+-	return bResult;
+-}
+-
+-__forceinline BOOL SendWP81UsbCtlCode(WINUSB_INTERFACE_HANDLE hUsbInterface,UINT code)
+-{
+-	WINUSB_SETUP_PACKET usbPacket = {};
+-	usbPacket.RequestType = 0x21; //magic
+-	usbPacket.Request = code;
+-	DWORD dwTemp = 0;
+-	return WinUsb_ControlTransfer(hUsbInterface,usbPacket,NULL,0,&dwTemp,NULL);
+-}
+-
+-typedef enum{
+-	WP_ProjectionScreenOrientation_Default = 0, //ƒ¨»œ£® ˙£©
+-	WP_ProjectionScreenOrientation_Normal = 1, // ˙∆¡
+-	WP_ProjectionScreenOrientation_Hori_KeyBack = 2, //∫·∆¡£®∑ΩœÚœÚ◊≈∫ÛÕÀ∞¥≈•£©
+-	WP_ProjectionScreenOrientation_Hori_KeySearch = 8, //∫·∆¡£®∑ΩœÚœÚ◊≈À—À˜∞¥≈•£©
+-}WP81ProjectionScreenOrientation,*PWP81ProjectionScreenOrientation; 
+-
+-class CWP81ProjectionClient : public IUnknown
++class CWP81ProjectionClient
+ {
+ private:
+-	ULONG RefCount = 1;
+ 	LPWSTR lpstrUsbVid = NULL;
+ 	HANDLE hFile = INVALID_HANDLE_VALUE;
+ 	HANDLE hEvent = NULL;
++	HANDLE hWrite = NULL;
+ 	WINUSB_INTERFACE_HANDLE hUsb = NULL;
+ 	PVOID pBufOfData = NULL;
+ 	DWORD dwBufferSize = 0;
+ 	BOOL bIoPending = FALSE;
+ 	WP_SCRREN_TO_PC_PIPE usbPipe;
+ 	OVERLAPPED ioOverlapped;
++	OVERLAPPED ioWrite;
+ 	CRITICAL_SECTION cs;
+ 	DWORD dwPhoneWidth = 0,dwPhoneHeight = 0,dwPhoneStride = 0;
++	DWORD send[48];
++	DWORD last;
+ public:
+ 	CWP81ProjectionClient(LPCWSTR lpszUsbVid);
+ 	~CWP81ProjectionClient();
+-public:  //IUnknown
+-	IFACEMETHODIMP QueryInterface(REFIID iid,void** ppvObject)
+-	{
+-		if (ppvObject == NULL)
+-			return E_POINTER;
+-		if (iid == IID_IUnknown)
+-		{
+-			*ppvObject = static_cast<IUnknown*>(this);
+-			AddRef();
+-			return S_OK;
+-		}else{
+-			*ppvObject = NULL;
+-			return E_NOINTERFACE;
+-		}
+-	}
+-
+-	IFACEMETHODIMP_(ULONG) AddRef()
+-	{
+-		return (ULONG)InterlockedIncrement(&RefCount);
+-	}
+-
+-	IFACEMETHODIMP_(ULONG) Release()
+-	{
+-		ULONG _RefCount = (ULONG)InterlockedDecrement(&RefCount);
+-		if (_RefCount == 0)
+-			delete this;
+-		return _RefCount;
+-	}
+ public: //My Methods (Error Query:GetLastError)
+ 	/*
+-	≥ı ºªØWPÕ∂”∞“«( ÷ª˙ª·≥ˆœ÷ «∑Ò‘ –ÌÕ∂”∞∂‘ª∞øÚ)
++	≥ı ºªØWPÕ∂”∞“«( ÷ª˙ª·≥ˆœ÷ «∑Ò‘ –˙È∂”∞∂‘ª∞øÅE
+ 	≤Œ ˝£∫
+-		dwMaxBufferSize ◊Ó¥Û∂¡ ˝æ›ª∫≥Â«¯¥Û–°
++		dwMaxBufferSize ◊˚–Û∂¡ ˝æ›ª∫≥Â«¯¥Û–°
+ 	*/
+-	virtual BOOL STDMETHODCALLTYPE Initialize(DWORD dwMaxBufferSize = WP_SCREEN_TO_PC_ALIGN512_MAX_SIZE);
++	virtual BOOL Initialize(DWORD dwMaxBufferSize = WP_SCREEN_TO_PC_ALIGN512_MAX_SIZE);
++
++	virtual void Reset();
+ 	/*
+ 	∂¡»°µ±«∞µƒ∆¡ƒªÕºœÒ£®ÕºœÒŒ™16bitµƒBMP ˝æ›£©
+ 	≤Œ ˝£∫
+ 		dwBufferSize ª∫≥Â«¯¥Û–°
+-		pBuffer  ˝æ›Ω´±ª–¥µΩ’‚∏ˆª∫≥Â«¯
+-		pWidth ÕºœÒ∏ﬂ∂»
+-		pHeight ÕºœÒøÌ∂»
+-		pdwBits ÕºœÒ…´…Ó
+-		pOrientation ∆¡ƒª∑ΩœÚ
+-	*/
+-	virtual BOOL STDMETHODCALLTYPE ReadImageAsync();
++		pBuffer  ˝æ›Ω´±ª–¥µΩ’‚∏ˆª∫≥Â«ÅE		pWidth ÕºœÒ∏ﬂ∂»
++		pHeight ÕºœÒø˙“»
++		pdwBits ÕºœÒ…´…ÅE		pOrientation ∆¡ƒª∑ΩœÅE	*/
++	virtual BOOL ReadImageAsync();
+ 	/*
+-	µ»¥˝“Ï≤ΩIO∂¡»°ÕÍ≥…
++	µ»¥˝“ÅEΩIO∂¡»°ÕÅE…
+ 	≤Œ ˝£∫
+ 		dwTimeout ≥¨ ± ±º‰£¨ƒ¨»œŒﬁœﬁµ»¥˝
+ 	*/
+-	virtual BOOL STDMETHODCALLTYPE WaitReadImageComplete(DWORD dwSizeOfBuf,PBYTE pBuffer,PUINT32 pWidth,PUINT32 pHeight,PDWORD pdwBits,PUINT pOrientation,DWORD dwTimeout = INFINITE,BOOL bFastCall = FALSE);
+-	/*
+-	ªÒ»° ÷ª˙‘≠ ºœ‘ æµƒ∑÷±Ê¬ ¥Û–°
+-	≤Œ ˝£∫
+-		pdwWidth ‘≠ º∏ﬂ∂»
+-		pdwHeight ‘≠ ºøÌ∂»
+-	*/
+-	virtual BOOL STDMETHODCALLTYPE GetPhoneScreenPixel(PDWORD pdwWidth,PDWORD pdwHeight);
+-	/*
+-	≈–∂œUSBΩ”ø⁄ «∑Ò «USB2.0“‘œ¬µƒÀŸ∂»
+-	≤Œ ˝£∫
+-		Œﬁ£¨∑µªÿ÷µŒ™TRUE‘Ú «µÕÀŸ
+-	*/
+-	virtual BOOL STDMETHODCALLTYPE IsLowSpeedUsbPort(PBOOL pbLowSpeed);
++	virtual BOOL WaitReadImageComplete(PBYTE* ppBuffer,PUINT32 pWidth,PUINT32 pHeight,PDWORD pdwBits, PDWORD pdwStride,PUINT pOrientation,DWORD dwTimeout = INFINITE,BOOL bFastCall = FALSE);
++
++	virtual BOOL SendTouchEvent(UINT uMsg, WPARAM wParam, LPARAM lPos, LPARAM lSize, UINT Orientation);
+ };
+\ No newline at end of file
+diff -ruN src.org/WP81ProjectionClient/WP81ProjectionClient.vcxproj src/WP81ProjectionClient/WP81ProjectionClient.vcxproj
+--- src.org/WP81ProjectionClient/WP81ProjectionClient.vcxproj	2018-10-31 11:49:13.765066700 +0900
++++ src/WP81ProjectionClient/WP81ProjectionClient.vcxproj	2018-11-06 16:37:19.875463200 +0900
+@@ -1,5 +1,5 @@
+ Ôªø<?xml version="1.0" encoding="utf-8"?>
+-<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
++<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <ItemGroup Label="ProjectConfigurations">
+     <ProjectConfiguration Include="Release|ARM">
+       <Configuration>Release</Configuration>
+@@ -17,26 +17,27 @@
+   <PropertyGroup Label="Globals">
+     <ProjectGuid>{2D83279C-3BB2-43EC-8503-8E62FB1F3A99}</ProjectGuid>
+     <RootNamespace>WP81ProjectionClient</RootNamespace>
++    <WindowsTargetPlatformVersion>10.0.17134.0</WindowsTargetPlatformVersion>
+   </PropertyGroup>
+   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+     <ConfigurationType>DynamicLibrary</ConfigurationType>
+     <UseDebugLibraries>false</UseDebugLibraries>
+-    <PlatformToolset>v120</PlatformToolset>
++    <PlatformToolset>v141</PlatformToolset>
+     <WholeProgramOptimization>true</WholeProgramOptimization>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+     <ConfigurationType>DynamicLibrary</ConfigurationType>
+     <UseDebugLibraries>false</UseDebugLibraries>
+-    <PlatformToolset>v120</PlatformToolset>
++    <PlatformToolset>v141</PlatformToolset>
+     <WholeProgramOptimization>true</WholeProgramOptimization>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'" Label="Configuration">
+     <ConfigurationType>DynamicLibrary</ConfigurationType>
+     <UseDebugLibraries>false</UseDebugLibraries>
+-    <PlatformToolset>v120</PlatformToolset>
++    <PlatformToolset>v141</PlatformToolset>
+     <WholeProgramOptimization>true</WholeProgramOptimization>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+@@ -88,15 +89,17 @@
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <EnableCOMDATFolding>true</EnableCOMDATFolding>
+       <OptimizeReferences>true</OptimizeReferences>
+-      <AdditionalDependencies>kernel32.lib;shlwapi.lib;shell32.lib;ole32.lib;winusb.lib;setupapi.lib;mfplat.lib;</AdditionalDependencies>
++      <AdditionalDependencies>kernel32.lib;shlwapi.lib;shell32.lib;ole32.lib;winusb.lib;setupapi.lib;mfplat.lib;user32.lib;gdi32.lib</AdditionalDependencies>
+       <EntryPointSymbol>
+       </EntryPointSymbol>
+       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
+-      <AdditionalOptions>/EXPORT:CreateWP81ProjectionClient
++      <AdditionalOptions>
+ /EXPORT:InitWinPhoneProjectionClient
+ /EXPORT:FreeWinPhoneProjectionClient
++/EXPORT:ResetWinPhoneProjectionClient
+ /EXPORT:ReadWinPhoneScreenImageAsync
+ /EXPORT:WaitWinPhoneScreenImageComplete
++/EXPORT:SendWinPhoneTouchEvent
+ /EXPORT:FindFirstUsbBusDev
+ /EXPORT:FindNextUsbBusDev
+ /EXPORT:FindUsbBusGetDevPath
+diff -ruN src.org/WP81ProjectionClient/WP81ProjectionClient.vcxproj.user src/WP81ProjectionClient/WP81ProjectionClient.vcxproj.user
+--- src.org/WP81ProjectionClient/WP81ProjectionClient.vcxproj.user	1970-01-01 09:00:00.000000000 +0900
++++ src/WP81ProjectionClient/WP81ProjectionClient.vcxproj.user	2018-11-05 09:51:24.873494700 +0900
+@@ -0,0 +1,7 @@
++Ôªø<?xml version="1.0" encoding="utf-8"?>
++<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
++  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
++    <LocalDebuggerCommand>$(TargetDir)\MyProjectionClient.exe</LocalDebuggerCommand>
++    <DebuggerFlavor>WindowsLocalDebugger</DebuggerFlavor>
++  </PropertyGroup>
++</Project>
+\ No newline at end of file
+diff -ruN src.org/WP81ProjectionClient/WP81ProjectionClientImpl.cpp src/WP81ProjectionClient/WP81ProjectionClientImpl.cpp
+--- src.org/WP81ProjectionClient/WP81ProjectionClientImpl.cpp	2018-10-31 11:49:13.868071000 +0900
++++ src/WP81ProjectionClient/WP81ProjectionClientImpl.cpp	2018-11-06 16:42:44.955585600 +0900
+@@ -1,12 +1,5 @@
+ #include "WP81ProjectionClient.h"
+ 
+-//Export Class Impl.
+-EXTERN_C VOID WINAPI CreateWP81ProjectionClient(LPCWSTR lpstrUsbVid,void** ppv)
+-{
+-	if (lpstrUsbVid && ppv)
+-		*ppv = new CWP81ProjectionClient(lpstrUsbVid);
+-}
+-
+ //Export C-Style.
+ EXTERN_C HANDLE WINAPI InitWinPhoneProjectionClient(LPCWSTR lpstrUsbVid)
+ {
+@@ -17,7 +10,7 @@
+ 		return p;
+ 	else
+ 	{
+-		p->Release();
++		delete p;
+ 		return NULL;
+ 	}
+ }
+@@ -25,7 +18,14 @@
+ EXTERN_C VOID WINAPI FreeWinPhoneProjectionClient(HANDLE p)
+ {
+ 	if (p)
+-		((CWP81ProjectionClient*)p)->Release();
++		delete (CWP81ProjectionClient*)p;
++}
++
++EXTERN_C VOID WINAPI ResetWinPhoneProjectionClient(HANDLE p)
++{
++	if (p == NULL)
++		return;
++	((CWP81ProjectionClient*)p)->Reset();
+ }
+ 
+ EXTERN_C BOOL WINAPI ReadWinPhoneScreenImageAsync(HANDLE p)
+@@ -35,9 +35,15 @@
+ 	return ((CWP81ProjectionClient*)p)->ReadImageAsync();
+ }
+ 
+-EXTERN_C BOOL WINAPI WaitWinPhoneScreenImageComplete(HANDLE p,DWORD dwSizeOfBuf,PBYTE pBuffer,PUINT32 pWidth,PUINT32 pHeight,PDWORD pdwBits,PUINT pOrientation,DWORD dwTimeout,BOOL bFastCall)
++EXTERN_C BOOL WINAPI WaitWinPhoneScreenImageComplete(HANDLE p,PBYTE* ppBuffer,PUINT32 pWidth,PUINT32 pHeight,PDWORD pdwBits,PDWORD pdwStride,PUINT pOrientation,DWORD dwTimeout,BOOL bFastCall)
++{
++	if (p == NULL)
++		return FALSE;
++	return ((CWP81ProjectionClient*)p)->WaitReadImageComplete(ppBuffer,pWidth,pHeight,pdwBits, pdwStride, pOrientation,dwTimeout,bFastCall);
++}
++EXTERN_C BOOL WINAPI SendWinPhoneTouchEvent(HANDLE p, UINT uMsg, WPARAM wParam, LPARAM lPos, LPARAM lSize, UINT Orientation)
+ {
+ 	if (p == NULL)
+ 		return FALSE;
+-	return ((CWP81ProjectionClient*)p)->WaitReadImageComplete(dwSizeOfBuf,pBuffer,pWidth,pHeight,pdwBits,pOrientation,dwTimeout,bFastCall);
+-}
+\ No newline at end of file
++	return ((CWP81ProjectionClient*)p)->SendTouchEvent(uMsg, wParam, lPos, lSize, Orientation);
++}
+diff -ruN src.org/WP81ProjectionClient/WP81ProjectionClientImpl.h src/WP81ProjectionClient/WP81ProjectionClientImpl.h
+--- src.org/WP81ProjectionClient/WP81ProjectionClientImpl.h	2018-10-31 11:49:13.947074100 +0900
++++ src/WP81ProjectionClient/WP81ProjectionClientImpl.h	2018-11-06 16:32:24.812333800 +0900
+@@ -4,8 +4,6 @@
+ #include <Windows.h>
+ #endif
+ 
+-#define PROJECTION_CLIENT_MAX_IMAGE_BUF_SIZE 0xC8600 //854 * 480(16bit)
+-
+ typedef enum{
+ 	WP_ProjectionScreenOrientation_Default = 0, //ƒ¨»œ£® ˙£©
+ 	WP_ProjectionScreenOrientation_Normal = 1, // ˙∆¡
+@@ -13,11 +11,12 @@
+ 	WP_ProjectionScreenOrientation_Hori_KeySearch = 8, //∫·∆¡£®∑ΩœÚœÚ◊≈À—À˜∞¥≈•£©
+ }WP81ProjectionScreenOrientation,*PWP81ProjectionScreenOrientation; 
+ 
+-EXTERN_C VOID WINAPI CreateWP81ProjectionClient(LPCWSTR lpstrUsbVid,void** ppv);
+ EXTERN_C HANDLE WINAPI InitWinPhoneProjectionClient(LPCWSTR lpstrUsbVid);
+ EXTERN_C VOID WINAPI FreeWinPhoneProjectionClient(HANDLE p);
++EXTERN_C VOID WINAPI ResetWinPhoneProjectionClient(HANDLE p);
+ EXTERN_C BOOL WINAPI ReadWinPhoneScreenImageAsync(HANDLE p);
+-EXTERN_C BOOL WINAPI WaitWinPhoneScreenImageComplete(HANDLE p,DWORD dwSizeOfBuf,PBYTE pBuffer,PUINT32 pWidth,PUINT32 pHeight,PDWORD pdwBits,PUINT pOrientation,DWORD dwTimeout = INFINITE,BOOL bFastCall = FALSE);
++EXTERN_C BOOL WINAPI WaitWinPhoneScreenImageComplete(HANDLE p,PBYTE* ppBuffer,PUINT32 pWidth,PUINT32 pHeight,PDWORD pdwBits,PDWORD pdwStride,PUINT pOrientation,DWORD dwTimeout = INFINITE,BOOL bFastCall = FALSE);
++EXTERN_C BOOL WINAPI SendWinPhoneTouchEvent(HANDLE p, UINT uMsg, WPARAM wParam, LPARAM lPos, LPARAM lSize, UINT Orientation);
+ 
+ EXTERN_C HANDLE WINAPI FindFirstUsbBusDev();
+ EXTERN_C BOOL WINAPI FindNextUsbBusDev(HANDLE h);
+diff -ruN src.org/WP81ProjectionClient/WP81ProjectionCommon.h src/WP81ProjectionClient/WP81ProjectionCommon.h
+--- src.org/WP81ProjectionClient/WP81ProjectionCommon.h	2018-10-31 11:49:14.059078600 +0900
++++ src/WP81ProjectionClient/WP81ProjectionCommon.h	2018-07-20 21:49:57.833304300 +0900
+@@ -12,7 +12,7 @@
+ 
+ #define WP_SCREEN_TO_PC_FLAG_FOURCC 0x44555608
+ #define WP_SCREEN_TO_PC_ALIGN_BUFFER_SIZE 512
+-#define WP_SCREEN_TO_PC_ALIGN512_MAX_SIZE 0xC8600 //854 * 480
++#define WP_SCREEN_TO_PC_ALIGN512_MAX_SIZE (2*1024*1024)
+ #define WP_SCREEN_TO_PC_IMAGE_DATA_OFFSET 0x200
+ 
+ #define WP_SCREEN_TO_PC_CTL_CODE_NOTIFY 2
+diff -ruN src.org/WP81ProjectionClient_Test/main.cpp src/WP81ProjectionClient_Test/main.cpp
+--- src.org/WP81ProjectionClient_Test/main.cpp	2018-10-31 11:49:14.659101400 +0900
++++ src/WP81ProjectionClient_Test/main.cpp	2018-08-01 12:12:27.958184400 +0900
+@@ -10,24 +10,25 @@
+ 	IWICImagingFactory* pWICFactory = NULL;
+ 	CoCreateInstance(CLSID_WICImagingFactory1,NULL,CLSCTX_ALL,IID_PPV_ARGS(&pWICFactory));
+ 
+-	PBYTE p = (PBYTE)malloc(PROJECTION_CLIENT_MAX_IMAGE_BUF_SIZE); //RAWÕºœÒ ˝æ›
+-	HANDLE hUsbBusDev = FindFirstUsbBusDev(); //≤È’“USB…Ë±∏£®WP ÷ª˙£©
+-	if (hUsbBusDev) //»Áπ˚¥Ê‘⁄USB…Ë±∏
++	PBYTE p;
++	HANDLE hUsbBusDev = FindFirstUsbBusDev(); //âÁõqUSBïàâWÅEWPï‘éöÅE
++	if (hUsbBusDev) //îÂçõä‰öÿUSBïàâW
+ 	{
+ 		WCHAR szDevPath[MAX_PATH] = {};
+-		FindUsbBusGetDevPath(hUsbBusDev,szDevPath,ARRAYSIZE(szDevPath)); //»°µ√µ⁄“ª∏ˆUSB…Ë±∏¬∑æ∂£¨ø…Next≤È’“œ¬∏ˆ
+-		FindUsbBusClose(hUsbBusDev); //πÿ±’≤È’“
++		FindUsbBusGetDevPath(hUsbBusDev,szDevPath,ARRAYSIZE(szDevPath)); //îüãbãyôπåÙUSBïàâWëµè¥ÅEêhNextâÁõqòaåÙ
++		FindUsbBusClose(hUsbBusDev); //çwâtâÁõq
+ 		if (wcslen(szDevPath) > 0)
+ 		{
+-			HANDLE h = InitWinPhoneProjectionClient(szDevPath); //≥ı ºªØÕ∂”∞£®WP ÷ª˙ª·≥ˆœ÷Õ®÷™£©
++			HANDLE h = InitWinPhoneProjectionClient(szDevPath); //äïï∫éNóUöOÅEWPï‘éöéÅäñÅEóGõ®ÅE
+ 			if (h)
+ 			{
+ 				_FOREVER_LOOP{
+-					if (!ReadWinPhoneScreenImageAsync(h)) //∑¢ÀÕ∂¡«Î«Û
++					if (!ReadWinPhoneScreenImageAsync(h)) //åAñlãøîãîì
+ 						break;
+ 					UINT nWidth = 0,nHeight = 0,nOrientation = WP_SCR_ORI_DEFAULT;
+ 					DWORD dwImageBits = 0;
+-					if (!WaitWinPhoneScreenImageComplete(h,PROJECTION_CLIENT_MAX_IMAGE_BUF_SIZE,p,&nWidth,&nHeight,&dwImageBits,&nOrientation)) //µ»¥˝ ˝æ›∂¡»°ÕÍ≥…
++					DWORD dwSrtride = 0;
++					if (!WaitWinPhoneScreenImageComplete(h,&p,&nWidth,&nHeight,&dwImageBits,&dwSrtride,&nOrientation)) //ãgä˚ï˚è€ãøîüóääh
+ 						break;
+ 					CHAR szBuffer[MAX_PATH] = {};
+ 					wsprintfA(szBuffer,"Image Accept:%d x %d,%d Bits,Orientation:%d",nWidth,nHeight,dwImageBits,nOrientation);
+@@ -64,12 +65,11 @@
+ 					pBitmap->Release();
+ 					*/
+ 				}
+-				FreeWinPhoneProjectionClient(h); // Õ∑≈Õ∂”∞øÕªß∂À
++				FreeWinPhoneProjectionClient(h); //ïÀådóUöOêléFã…
+ 			}
+ 		}
+ 	}
+ 	pWICFactory->Release();
+-	free(p);
+ 	CoUninitialize();
+ 	ExitProcess(0);
+ }
+\ No newline at end of file
+diff -ruN src.org/WP81ProjectionClient_Test/WP81ProjectionClient_Test.vcxproj src/WP81ProjectionClient_Test/WP81ProjectionClient_Test.vcxproj
+--- src.org/WP81ProjectionClient_Test/WP81ProjectionClient_Test.vcxproj	2018-10-31 11:49:14.547480900 +0900
++++ src/WP81ProjectionClient_Test/WP81ProjectionClient_Test.vcxproj	2018-07-20 16:16:54.143526400 +0900
+@@ -1,5 +1,5 @@
+ Ôªø<?xml version="1.0" encoding="utf-8"?>
+-<Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
++<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <ItemGroup Label="ProjectConfigurations">
+     <ProjectConfiguration Include="Release|Win32">
+       <Configuration>Release</Configuration>
+@@ -9,12 +9,13 @@
+   <PropertyGroup Label="Globals">
+     <ProjectGuid>{32548B23-1315-4BFF-99A7-D2E1505D2B5C}</ProjectGuid>
+     <RootNamespace>WP81ProjectionClient_Test</RootNamespace>
++    <WindowsTargetPlatformVersion>10.0.16299.0</WindowsTargetPlatformVersion>
+   </PropertyGroup>
+   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
+     <ConfigurationType>Application</ConfigurationType>
+     <UseDebugLibraries>false</UseDebugLibraries>
+-    <PlatformToolset>v120</PlatformToolset>
++    <PlatformToolset>v141</PlatformToolset>
+     <WholeProgramOptimization>true</WholeProgramOptimization>
+     <CharacterSet>Unicode</CharacterSet>
+   </PropertyGroup>
+@@ -50,7 +51,7 @@
+       <GenerateDebugInformation>true</GenerateDebugInformation>
+       <EnableCOMDATFolding>true</EnableCOMDATFolding>
+       <OptimizeReferences>true</OptimizeReferences>
+-      <AdditionalDependencies>kernel32.lib;ntdll.lib;crt.lib;user32.lib;gdi32.lib;advapi32.lib;shell32.lib;shlwapi.lib;winmm.lib;ole32.lib;oleaut32.lib;mf.lib;mfuuid.lib;mfcore.lib;mfplat.lib;mfplay.lib;mfreadwrite.lib;</AdditionalDependencies>
++      <AdditionalDependencies>kernel32.lib;ntdll.lib;ucrt.lib;user32.lib;gdi32.lib;advapi32.lib;shell32.lib;shlwapi.lib;winmm.lib;ole32.lib;oleaut32.lib;mf.lib;mfuuid.lib;mfcore.lib;mfplat.lib;mfplay.lib;mfreadwrite.lib</AdditionalDependencies>
+       <EntryPointSymbol>main</EntryPointSymbol>
+       <ImageHasSafeExceptionHandlers>false</ImageHasSafeExceptionHandlers>
+     </Link>
